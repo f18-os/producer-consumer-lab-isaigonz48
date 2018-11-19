@@ -13,34 +13,138 @@ class ExtractThread(Thread):
     def __init__(self, filename, extractionQueue):
         Thread.__init__(self, daemon=False)
         self.fname = filename
-        self.eQueue = extractionQueue
+        ##### Kept mostly the same naming convention as used in ExtractAndDisplay.py
+        self.outputBuffer = extractionQueue
         self.start()
     def run(self):
-        extractFrames(self.fname,self.eQueue)
-        print("THREAD 1 DONE")
-        self.eQueue.doneInput = 1
+        self.extractFrames()
+        print("Extract thread done")
+        ##### Signals that there will be no more inputting into the queue
+        self.outputBuffer.doneInput = 1
+
+    def extractFrames(self):
+        ##### Mostly code from ExtractAndDisplay.py
+        count = 0
+
+        vidcap = cv2.VideoCapture(self.fname)
     
+        success,image = vidcap.read()
+    
+        print("Reading frame {} {} ".format(count, success))
+        while success:
+            success, jpgImage = cv2.imencode('.jpg', image)
+        
+            jpgAsText = base64.b64encode(jpgImage)
+        
+            self.outputBuffer.pcPut(jpgAsText)
+        
+            success,image = vidcap.read()
+            print('Reading frame {} {}'.format(count, success))
+            count += 1
+
+        #print("Frame extraction complete")
+
+        
 class ConvertThread(Thread):
     def __init__(self, extractionQueue, convertedQueue):
         Thread.__init__(self, daemon=False)
-        self.eQueue = extractionQueue
-        self.cQueue = convertedQueue
+        ##### Get frames from extractionQueue, put frames into convertedQueue
+        self.inputBuffer = extractionQueue
+        self.outputBuffer = convertedQueue
         self.start()
     def run(self):
-        ConvertToGrayscale(self.eQueue, self.cQueue)
-        print("THREAD 2 DONE")
-        self.cQueue.doneInput = 1
+        self.ConvertToGrayscale()
+        print("Converting thread done")
+        self.outputBuffer.doneInput = 1
 
 
+    def ConvertToGrayscale(self):
+        count = 0
+        
+        while True:
+            frameAsText = self.inputBuffer.pcGet()
+            
+            if(not frameAsText):
+                break
+
+            jpgRawImage = base64.b64decode(frameAsText)
+            
+            jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
+            
+            img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
+            ########
+            print("Converting frame {}".format(count))
+            
+            grayscaleFrame = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            success, grayImg = cv2.imencode('.jpg',grayscaleFrame)
+            
+            if(success):
+                grayAsText = base64.b64encode(grayImg)
+                self.outputBuffer.pcPut(grayAsText)
+                
+            count += 1
+            if(self.inputBuffer.doneOutput == 1):
+                break
+
+        #print("Finished grayscaling all queue")
+
+        
 class DisplayThread(Thread):
     def __init__(self, convertedQueue):
         Thread.__init__(self, daemon=False)
-        self.cQueue = convertedQueue
+        self.inputBuffer = convertedQueue
+        self.frameDelay = 42
         self.start()
     def run(self):
-        displayFrames(self.cQueue)
-        print("THREAD 3 DONE")
+        self.displayFrames()
+        print("Displaying thread done")
 
+    def displayFrames(self):
+        # initialize frame count
+        count = 0
+
+        while True:
+
+            startTime = time.time()
+
+            ##### Mostly from ExtractAndDisplay.py
+            frameAsText = self.inputBuffer.pcGet()
+
+            ##### If pcGet() returned None, then there are no more frames
+            if(not frameAsText):
+                break
+            
+            jpgRawImage = base64.b64decode(frameAsText)
+
+            jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
+        
+            img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
+            
+            print("Displaying frame {}".format(count))        
+            
+            cv2.imshow("Video", img)
+
+            ##### Mostly from DisplayFrames.py
+            elapsedTime = int((time.time() - startTime) * 1000)
+            #print("Time to process frame {} ms".format(elapsedTime))
+    
+            timeToWait = max(1, self.frameDelay - elapsedTime)
+            
+            if cv2.waitKey(timeToWait) and 0xFF == ord("q"):
+                break    
+
+            count += 1
+
+            ##### If all the frames have been output (Not really needed because of the code that checks if pcGet() return None, but just in case
+            if(self.inputBuffer.doneOutput == 1):
+                break
+            
+        #print("Finished displaying all frames")
+    
+        cv2.destroyAllWindows()
+
+        
 class ProConQueue(queue.Queue):
     def __init__(self,size):
         queue.Queue.__init__(self,size)
@@ -52,7 +156,7 @@ class ProConQueue(queue.Queue):
     def pcGet(self):
         if(self.doneInput == 1):
             if(self.empty()):
-                doneOutput = 1
+                self.doneOutput = 1
                 return
             return self.get()
         
@@ -65,103 +169,6 @@ class ProConQueue(queue.Queue):
                     self.doneOutput = 1
                     break
             return self.get()
-
-def extractFrames(fileName, outputBuffer):
-    # Initialize frame count 
-    count = 0
-
-    # open video file
-    vidcap = cv2.VideoCapture(fileName)
-    
-    # read first image
-    success,image = vidcap.read()
-    
-    print("Reading frame {} {} ".format(count, success))
-    while success:
-        # get a jpg encoded frame
-        success, jpgImage = cv2.imencode('.jpg', image)
-        
-        #encode the frame as base 64 to make debugging easier
-        jpgAsText = base64.b64encode(jpgImage)
-        
-        # add the frame to the buffer
-        outputBuffer.pcPut(jpgAsText)
-       
-        success,image = vidcap.read()
-        print('Reading frame {} {}'.format(count, success))
-        count += 1
-
-    print("Frame extraction complete")
-
-def ConvertToGrayscale(inputBuffer, outputBuffer):
-    count = 0
-
-    while True:
-        #########
-        ######### INPUTTTT
-        frameAsText = inputBuffer.pcGet()
-        
-        # decode the frame 
-        if(not frameAsText):
-            break
-        jpgRawImage = base64.b64decode(frameAsText)
-
-        # convert the raw frame to a numpy array
-        jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
-        
-        # get a jpg encoded frame
-        img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
-        ########
-        print("Converting frame {}".format(count))
-        
-        grayscaleFrame = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        success, grayImg = cv2.imencode('.jpg',grayscaleFrame)
-
-        if(success):
-            grayAsText = base64.b64encode(grayImg)
-            outputBuffer.pcPut(grayAsText)
-        
-        count += 1
-        if(inputBuffer.doneOutput == 1):
-            break
-
-    print("Finisshed grayscaling all queue")
-
-    
-def displayFrames(inputBuffer):
-    # initialize frame count
-    count = 0
-
-    while True:
-        # get the next frame
-        frameAsText = inputBuffer.pcGet()
-        if(not frameAsText):
-            break
-        # decode the frame 
-        jpgRawImage = base64.b64decode(frameAsText)
-
-        # convert the raw frame to a numpy array
-        jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
-        
-        # get a jpg encoded frame
-        img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
-
-        print("Displaying frame {}".format(count))        
-
-        # display the image in a window called "video" and wait 42ms
-        # before displaying the next frame
-        cv2.imshow("Video", img)
-        if cv2.waitKey(42) and 0xFF == ord("q"):
-            break
-
-        count += 1
-        if(inputBuffer.doneOutput == 1):
-            break
-
-    print("Finished displaying all frames")
-    
-    cv2.destroyAllWindows()
 
 filename = 'clip.mp4'
 
