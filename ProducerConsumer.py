@@ -39,7 +39,7 @@ class ExtractThread(Thread):
             self.outputBuffer.pcPut(jpgAsText)
         
             success,image = vidcap.read()
-            print('Reading frame {} {}'.format(count, success))
+            print('Reading frame {} {}'.format(count))
             count += 1
 
         #print("Frame extraction complete")
@@ -72,10 +72,13 @@ class ConvertThread(Thread):
             jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
             
             img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
-            ########
+            
             print("Converting frame {}".format(count))
             
             grayscaleFrame = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+            ##### After converting to gray, must encode it as text (opposite of when it got decoded)
+            ##### Code like the Extract method
             
             success, grayImg = cv2.imencode('.jpg',grayscaleFrame)
             
@@ -84,6 +87,7 @@ class ConvertThread(Thread):
                 self.outputBuffer.pcPut(grayAsText)
                 
             count += 1
+            ##### If all the frames have been output (Not really needed because of the code that checks if pcGet() return None, but just in case
             if(self.inputBuffer.doneOutput == 1):
                 break
 
@@ -94,6 +98,7 @@ class DisplayThread(Thread):
     def __init__(self, convertedQueue):
         Thread.__init__(self, daemon=False)
         self.inputBuffer = convertedQueue
+        ##### Wasn't exactly sure how to get 24 fps, so I just used the number used in DisplayFrames.py
         self.frameDelay = 42
         self.start()
     def run(self):
@@ -136,7 +141,6 @@ class DisplayThread(Thread):
 
             count += 1
 
-            ##### If all the frames have been output (Not really needed because of the code that checks if pcGet() return None, but just in case
             if(self.inputBuffer.doneOutput == 1):
                 break
             
@@ -144,34 +148,44 @@ class DisplayThread(Thread):
     
         cv2.destroyAllWindows()
 
-        
+##### The producer consumer queue
 class ProConQueue(queue.Queue):
     def __init__(self,size):
+        ##### size limits the amount of things that can be in the queue
         queue.Queue.__init__(self,size)
+        ##### 1 if no more input is expected
         self.doneInput = 0
+        ##### 1 if no more output is expected
         self.doneOutput = 0
+
+    ##### pcPut and pcGet (producer consumer put/get)
+    ##### putting is basically the same because it will wait if the queue is full
     def pcPut(self, something):
         self.put(something)
 
     def pcGet(self):
+        ##### No more input is expected, so get until the queue is empty, return None when empty
         if(self.doneInput == 1):
             if(self.empty()):
                 self.doneOutput = 1
                 return
             return self.get()
-        
+        ##### If the queue is still receiving input, get if the queue is not empty
+        ##### otherwise, sleep for .1 seconds (No reason for .1), then increase counter nd try again
+        ##### If the counter reaches 50, 5 second have passed and the queue has not received input, so it will be assumed that no more is expected from the queue 
         else:
-            startTime = 0 #time() + 0
+            startTime = 0
             while self.empty():
                 time.sleep(.1)
                 startTime += 1
-                if(startTime == 10):
+                if(startTime == 50):
                     self.doneOutput = 1
                     break
             return self.get()
 
 filename = 'clip.mp4'
 
+##### One queue shared by extraction and convertion, and one shared by convertion and displaying
 extractionQueue = ProConQueue(10)
 convertedQueue = ProConQueue(10)
 
