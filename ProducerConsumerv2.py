@@ -3,11 +3,25 @@
 import threading
 import time
 from threading import Thread
+from threading import Lock
 import cv2
 import numpy as np
 import base64
-import queue
+#import queue
 
+class Q:
+    def __init__(self, initArray = []):
+        self.a = []
+        self.a = [x for x in initArray]
+    def put(self, item):
+        self.a.append(item)
+    def get(self):
+        a = self.a
+        item = a[0]
+        del a[0]
+        return item
+    def __repr__(self):
+        return "Q(%s)" % self.a
 
 class ExtractThread(Thread):
     def __init__(self, filename, extractionQueue):
@@ -18,7 +32,7 @@ class ExtractThread(Thread):
         self.start()
     def run(self):
         self.extractFrames()
-        print("Extract thread done")
+        print("---Extract thread done---")
         ##### Signals that there will be no more inputting into the queue
         self.outputBuffer.doneInput = 1
 
@@ -54,7 +68,7 @@ class ConvertThread(Thread):
         self.start()
     def run(self):
         self.ConvertToGrayscale()
-        print("Converting thread done")
+        print("---Converting thread done---")
         self.outputBuffer.doneInput = 1
 
 
@@ -103,7 +117,7 @@ class DisplayThread(Thread):
         self.start()
     def run(self):
         self.displayFrames()
-        print("Displaying thread done")
+        print("---Displaying thread done---")
 
     def displayFrames(self):
         # initialize frame count
@@ -149,45 +163,73 @@ class DisplayThread(Thread):
         cv2.destroyAllWindows()
 
 ##### The producer consumer queue
-class ProConQueue(queue.Queue):
-    def __init__(self,size):
-        ##### size limits the amount of things that can be in the queue
-        queue.Queue.__init__(self,size)
+class ProConQueue(Q):
+    def __init__(self,size, lock):
+        Q.__init__(self)
+
+        self.lock = lock
+        self.maxSize = 10
+        self.size = 0
         ##### 1 if no more input is expected
         self.doneInput = 0
         ##### 1 if no more output is expected
         self.doneOutput = 0
 
     ##### pcPut and pcGet (producer consumer put/get)
-    ##### putting is basically the same because it will wait if the queue is full
     def pcPut(self, something):
+        startTime = 0
+        ##### Checks if the queue is full (size == 10)
+        ##### If it is, sleep for .01 seconds and then try again
+        while(self.size == 10):
+            time.sleep(.01)
+            startTime += 1
+            if(startTime == 500):
+                self.doneInput = 1
+                break
+        self.lock.acquire()
+        self.size += 1
         self.put(something)
-
+        self.lock.release()
+        
     def pcGet(self):
         ##### No more input is expected, so get until the queue is empty, return None when empty
         if(self.doneInput == 1):
             if(self.empty()):
                 self.doneOutput = 1
                 return
-            return self.get()
+            self.lock.acquire()
+            self.size -= 1
+            item = self.get()
+            self.lock.release()
+            return item
         ##### If the queue is still receiving input, get if the queue is not empty
-        ##### otherwise, sleep for .01 seconds (No particular reason for .01, but I thought it was not too short or not too long), then increase counter nd try again
+        ##### otherwise, sleep for .01 seconds (No reason for .1), then increase counter nd try again
         ##### If the counter reaches 500, 5 second have passed and the queue has not received input, so it will be assumed that no more is expected from the queue 
         else:
             startTime = 0
             while self.empty():
-                time.sleep(.1)
+                time.sleep(.01)
                 startTime += 1
-                if(startTime == 50):
+                if(startTime == 500):
                     self.doneOutput = 1
                     break
-            return self.get()
+                
+            self.lock.acquire()
+            self.size -= 1
+            item = self.get()
+            self.lock.release()
+            return item
 
+    def empty(self):
+        return self.size == 0
 filename = 'clip.mp4'
 
-##### One queue shared by extraction and convertion, and one shared by convertion and displaying
-extractionQueue = ProConQueue(10)
-convertedQueue = ProConQueue(10)
+##### One queue shared by extraction and convertion, and one shared by convertion and displaying. Each queue uses different lock
+extractionLock = Lock()
+convertedLock = Lock()
+
+extractionQueue = ProConQueue(10, extractionLock)
+convertedQueue = ProConQueue(10, convertedLock)
 
 ExtractThread(filename, extractionQueue)
 ConvertThread(extractionQueue, convertedQueue)
