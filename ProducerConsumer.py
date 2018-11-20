@@ -3,11 +3,27 @@
 import threading
 import time
 from threading import Thread
+from threading import Semaphore
 import cv2
 import numpy as np
 import base64
-import queue
+#import queue
 
+
+##### Code given on the google groups
+class Q:
+    def __init__(self, initArray = []):
+        self.a = []
+        self.a = [x for x in initArray]
+    def put(self, item):
+        self.a.append(item)
+    def get(self):
+        a = self.a
+        item = a[0]
+        del a[0]
+        return item
+    def __repr__(self):
+        return "Q(%s)" % self.a
 
 class ExtractThread(Thread):
     def __init__(self, filename, extractionQueue):
@@ -18,7 +34,7 @@ class ExtractThread(Thread):
         self.start()
     def run(self):
         self.extractFrames()
-        print("Extract thread done")
+        print("---Extract thread done---")
         ##### Signals that there will be no more inputting into the queue
         self.outputBuffer.doneInput = 1
 
@@ -54,7 +70,7 @@ class ConvertThread(Thread):
         self.start()
     def run(self):
         self.ConvertToGrayscale()
-        print("Converting thread done")
+        print("---Converting thread done---")
         self.outputBuffer.doneInput = 1
 
 
@@ -64,9 +80,6 @@ class ConvertThread(Thread):
         while True:
             frameAsText = self.inputBuffer.pcGet()
             
-            if(not frameAsText):
-                break
-
             jpgRawImage = base64.b64decode(frameAsText)
             
             jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
@@ -87,7 +100,8 @@ class ConvertThread(Thread):
                 self.outputBuffer.pcPut(grayAsText)
                 
             count += 1
-            ##### If all the frames have been output (Not really needed because of the code that checks if pcGet() return None, but just in case
+
+            ##### No more input into queue, and no more output into queue, so work is done
             if(self.inputBuffer.doneOutput == 1):
                 break
 
@@ -103,7 +117,7 @@ class DisplayThread(Thread):
         self.start()
     def run(self):
         self.displayFrames()
-        print("Displaying thread done")
+        print("---Displaying thread done---")
 
     def displayFrames(self):
         # initialize frame count
@@ -116,10 +130,6 @@ class DisplayThread(Thread):
             ##### Mostly from ExtractAndDisplay.py
             frameAsText = self.inputBuffer.pcGet()
 
-            ##### If pcGet() returned None, then there are no more frames
-            if(not frameAsText):
-                break
-            
             jpgRawImage = base64.b64decode(frameAsText)
 
             jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
@@ -149,46 +159,80 @@ class DisplayThread(Thread):
         cv2.destroyAllWindows()
 
 ##### The producer consumer queue
-class ProConQueue(queue.Queue):
-    def __init__(self,size):
-        ##### size limits the amount of things that can be in the queue
-        queue.Queue.__init__(self,size)
+class ProConQueue(Q):
+    def __init__(self,maxsize):
+        Q.__init__(self)
+
+        self.maxsize = maxsize
+        self.size = 0
+
+        ##### produce semaphore will block if maxsize items are in the queue
+        ##### consume semaphore will block if there are no items in the queue
+        ##### lock semaphore is just a regular mutex
+        self.lock = Semaphore(1)
+        self.produce = Semaphore(maxsize)
+        self.consume = Semaphore(0)
+        
         ##### 1 if no more input is expected
         self.doneInput = 0
         ##### 1 if no more output is expected
         self.doneOutput = 0
 
     ##### pcPut and pcGet (producer consumer put/get)
-    ##### putting is basically the same because it will wait if the queue is full
     def pcPut(self, something):
-        self.put(something)
 
+        ##### first check if there is space for a new item in the queue, block otherwise
+        self.produce.acquire()
+
+        ##### make sure no one else edits the queue while this is executed
+        self.lock.acquire()
+        self.size += 1
+        self.put(something)
+        self.lock.release()
+
+        ##### one more item can be consumed
+        self.consume.release()
+
+        ##### debugging message to make sure locks are working properly
+        if(self.size > 10):
+            print("ERROR MAX LIMIT EXCEEDED")
+    
     def pcGet(self):
-        ##### No more input is expected, so get until the queue is empty, return None when empty
+        ##### No more input is expected, so get until the queue is empty, set doneOutput flag to 1
         if(self.doneInput == 1):
-            if(self.empty()):
+            if(self.size == 1):
                 self.doneOutput = 1
-                return
-            return self.get()
+                self.lock.acquire()
+                self.size -= 1
+                item = self.get()
+                self.lock.release()
+                return item
+                
+            self.lock.acquire()
+            self.size -= 1
+            item = self.get()
+            self.lock.release()
+            return item
         ##### If the queue is still receiving input, get if the queue is not empty
-        ##### otherwise, sleep for .01 seconds (No particular reason for .01, but I thought it was not too short or not too long), then increase counter nd try again
-        ##### If the counter reaches 500, 5 second have passed and the queue has not received input, so it will be assumed that no more is expected from the queue 
         else:
-            startTime = 0
-            while self.empty():
-                time.sleep(.1)
-                startTime += 1
-                if(startTime == 50):
-                    self.doneOutput = 1
-                    break
-            return self.get()
+            ##### check if there are items in the queue, block if there are none
+            self.consume.acquire()
+            self.lock.acquire()
+            self.size -= 1
+            item = self.get()
+            self.lock.release()
+
+            ##### one more item can be produced
+            self.produce.release()
+            return item
+
 
 filename = 'clip.mp4'
 
-##### One queue shared by extraction and convertion, and one shared by convertion and displaying
+##### Initialize both queues with a maxsize of 10
 extractionQueue = ProConQueue(10)
-convertedQueue = ProConQueue(10)
+conversionQueue = ProConQueue(10)
 
 ExtractThread(filename, extractionQueue)
-ConvertThread(extractionQueue, convertedQueue)
-DisplayThread(convertedQueue)
+ConvertThread(extractionQueue, conversionQueue)
+DisplayThread(conversionQueue)
