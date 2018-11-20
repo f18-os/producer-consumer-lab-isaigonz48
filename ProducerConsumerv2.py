@@ -3,12 +3,14 @@
 import threading
 import time
 from threading import Thread
-from threading import Lock
+from threading import Semaphore
 import cv2
 import numpy as np
 import base64
 #import queue
 
+
+##### Code given on the google groups
 class Q:
     def __init__(self, initArray = []):
         self.a = []
@@ -164,10 +166,12 @@ class DisplayThread(Thread):
 
 ##### The producer consumer queue
 class ProConQueue(Q):
-    def __init__(self,size, lock):
+    def __init__(self,size, semaphore):
         Q.__init__(self)
 
-        self.lock = lock
+        self.lock = semaphore
+        self.produce = Semaphore(0)
+        self.consume = Semaphore(0)
         self.maxSize = 10
         self.size = 0
         ##### 1 if no more input is expected
@@ -181,15 +185,18 @@ class ProConQueue(Q):
         ##### Checks if the queue is full (size == 10)
         ##### If it is, sleep for .01 seconds and then try again
         while(self.size == 10):
-            time.sleep(.01)
-            startTime += 1
-            if(startTime == 500):
-                self.doneInput = 1
-                break
-        self.lock.acquire()
+            self.produce.acquire()
+            #time.sleep(.01)
+            #startTime += 1
+            #if(startTime == 500):
+            #    self.doneInput = 1
+            #    break
+            self.lock.acquire()
+        #self.sem.acquire()
         self.size += 1
         self.put(something)
         self.lock.release()
+        self.consume.release()
         
     def pcGet(self):
         ##### No more input is expected, so get until the queue is empty, return None when empty
@@ -208,16 +215,19 @@ class ProConQueue(Q):
         else:
             startTime = 0
             while self.empty():
-                time.sleep(.01)
-                startTime += 1
-                if(startTime == 500):
-                    self.doneOutput = 1
-                    break
+                self.consume.acquire()
+                #time.sleep(.01)
+                #startTime += 1
+                #if(startTime == 500):
+                #    self.doneOutput = 1
+                #    break
+                self.lock.acquire()
                 
-            self.lock.acquire()
+            #self.lock.acquire()
             self.size -= 1
             item = self.get()
             self.lock.release()
+            self.produce.release()
             return item
 
     def empty(self):
@@ -225,8 +235,8 @@ class ProConQueue(Q):
 filename = 'clip.mp4'
 
 ##### One queue shared by extraction and convertion, and one shared by convertion and displaying. Each queue uses different lock
-extractionLock = Lock()
-convertedLock = Lock()
+extractionLock = Semaphore(1)
+convertedLock = Semaphore(1)
 
 extractionQueue = ProConQueue(10, extractionLock)
 convertedQueue = ProConQueue(10, convertedLock)
